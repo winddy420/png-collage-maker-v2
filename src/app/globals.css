@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body { height: 100%; }
+body { background:#0f0b1e; color:#e9d5ff; }
+
+input[type="file"]::file-selector-button {
+  margin-right:.75rem; padding:.5rem 1rem; border-radius:9999px; border:0;
+  font-weight:600; background: rgb(126,34,206); color:#fff; cursor:pointer;
+}
+input[type="file"]::file-selector-button:hover { background: rgb(147,51,234); }
