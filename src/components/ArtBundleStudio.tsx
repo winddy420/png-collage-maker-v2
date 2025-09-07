@@ -23,6 +23,7 @@ function trimTransparent(canvas:HTMLCanvasElement,alpha=1){
 function shuffleInPlace<T>(arr:T[],rng=()=>Math.random()){for(let i=arr.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[arr[i],arr[j]]=[arr[j],arr[i]];}}
 function seededRng(seed?:number){let x=seed||123456789;return()=>{x^=x<<13;x^=x>>>17;x^=x<<5;return((x>>>0)/0xffffffff);};}
 function canvasToBlob(c:HTMLCanvasElement,t='image/png',q?:number){return new Promise<Blob|null>(res=>c.toBlob(res,t,q));}
+function slug(name:string){return (name||'image').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');}
 
 /******** Types ********/
 interface BundleItem{ id:string; img:HTMLImageElement; name:string; _trim?:{canvas:HTMLCanvasElement;width:number;height:number;} }
@@ -126,6 +127,9 @@ export default function ArtBundleStudio(){
   const [gapMs,setGapMs]=useState(150);
   const [videoBlob,setVideoBlob]=useState<Blob|null>(null);
 
+  // NEW: toggle for exporting all singles
+  const [alsoExportSingle,setAlsoExportSingle]=useState<boolean>(true);
+
   const mainCanvasRef=useRef<HTMLCanvasElement|null>(null);
   const animCanvasRef=useRef<HTMLCanvasElement|null>(null);
 
@@ -173,18 +177,57 @@ export default function ArtBundleStudio(){
   const randomize=()=>setSeed(Math.floor(Math.random()*1e9));
   const resetBundle=()=>setBundle([]);
 
+  // export helpers
+  function drawCollageBase(ctx:CanvasRenderingContext2D){
+    if(!bg) return;
+    ctx.clearRect(0,0,bg.naturalWidth,bg.naturalHeight);
+    ctx.drawImage(bg,0,0);
+  }
+  function drawAllPlacements(ctx:CanvasRenderingContext2D){
+    const byId:Record<string,BundleItem>=Object.fromEntries(bundle.map(b=>[b.id,b] as const));
+    for(const p of placements){
+      const t=byId[p.id]?._trim; if(!t) continue;
+      ctx.drawImage(t.canvas,0,0,t.width,t.height, collageArea.x+p.x,collageArea.y+p.y,p.w,p.h);
+    }
+  }
+  function drawSingleInFrame(ctx:CanvasRenderingContext2D, it:BundleItem){
+    if(!bg || !it._trim) return;
+    // place trimmed image inside the FR (collageArea) with "contain"
+    const FR = collageArea;
+    const r = it._trim.width / Math.max(1, it._trim.height);
+    let dw = FR.w, dh = FR.h;
+    if(dw / dh > r) dw = Math.round(dh * r); else dh = Math.round(dw / r);
+    const dx = Math.round(FR.x + (FR.w - dw)/2);
+    const dy = Math.round(FR.y + (FR.h - dh)/2);
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(it._trim.canvas, 0,0,it._trim.width,it._trim.height, dx,dy,dw,dh);
+  }
+
   const downloadCollage=async()=>{
     if(!bg) return;
     const { default: saveAs } = await import('file-saver');
+    // 1) collage (รวม)
     const off=document.createElement('canvas'); off.width=bg.naturalWidth; off.height=bg.naturalHeight;
-    const oc=off.getContext('2d')!; oc.drawImage(bg,0,0);
-    if(placements.length){
+    const oc=off.getContext('2d')!; drawCollageBase(oc); drawAllPlacements(oc);
+    const blob=await canvasToBlob(off,'image/png'); if(blob) saveAs(blob,'cover_collage.png');
+
+    // 2) ถ้าติ๊กไว้ → export รูปเดี่ยว "ทุกภาพ" ใน bundle
+    if(alsoExportSingle){
       const byId:Record<string,BundleItem>=Object.fromEntries(bundle.map(b=>[b.id,b] as const));
-      for(const p of placements){ const t=byId[p.id]?._trim; if(!t) continue;
-        oc.drawImage(t.canvas,0,0,t.width,t.height, collageArea.x+p.x,collageArea.y+p.y,p.w,p.h);
+      for(let i=0;i<order.length;i++){
+        const it = byId[order[i]];
+        if(!it || !it._trim) continue;
+        const c=document.createElement('canvas'); c.width=bg.naturalWidth; c.height=bg.naturalHeight;
+        const cx=c.getContext('2d')!; drawCollageBase(cx); drawSingleInFrame(cx, it);
+        const sblob=await canvasToBlob(c,'image/png');
+        if(sblob){
+          const base = slug(it.name) || `img-${i+1}`;
+          saveAs(sblob, `single_${String(i+1).padStart(2,'0')}_${base}.png`);
+          // เลี่ยง browser block ดาวน์โหลดซ้อน: หน่วงนิดหน่อย
+          await sleep(80);
+        }
       }
     }
-    const blob=await canvasToBlob(off,'image/png'); if(blob) saveAs(blob,'cover_collage.png');
   };
 
 const renderVideo = async () => {
@@ -209,7 +252,6 @@ const renderVideo = async () => {
     transition,
   });
 
-  // ถือเฟรมสุดท้ายไว้อีก ~0.5 วินาทีให้ transition จบเนียน ๆ
   const tailFrames = Math.round(fps * 0.5);
   const totalFrames = renderer.totalFrames + tailFrames;
 
@@ -218,7 +260,6 @@ const renderVideo = async () => {
     fps,
     totalFrames,
     drawFrame: (i) => {
-      // หลัง renderer วาดเฟรมสุดท้ายแล้ว ให้ค้างภาพสุดท้ายไว้จนจบ tail
       const idx = Math.min(i, renderer.totalFrames - 1);
       renderer.drawFrame(idx);
     },
@@ -236,9 +277,25 @@ const renderVideo = async () => {
     const [{ default: JSZip }, { default: saveAs }] = await Promise.all([import('jszip'), import('file-saver')]);
     const zip = new JSZip();
     if(bg){
-      const off=document.createElement('canvas'); off.width=bg.naturalWidth; off.height=bg.naturalHeight; const oc=off.getContext('2d')!; oc.drawImage(bg,0,0);
-      if(placements.length){ const byId:Record<string,BundleItem>=Object.fromEntries(bundle.map(b=>[b.id,b] as const)); for(const p of placements){ const t=byId[p.id]?._trim; if(!t) continue; oc.drawImage(t.canvas,0,0,t.width,t.height, collageArea.x+p.x,collageArea.y+p.y,p.w,p.h); } }
+      // collage.png
+      const off=document.createElement('canvas'); off.width=bg.naturalWidth; off.height=bg.naturalHeight;
+      const oc=off.getContext('2d')!; drawCollageBase(oc); drawAllPlacements(oc);
       const collageBlob=await canvasToBlob(off,'image/png'); if(collageBlob) zip.file('cover_collage.png',collageBlob);
+
+      // singles for ALL images (if toggled)
+      if(alsoExportSingle){
+        const byId:Record<string,BundleItem>=Object.fromEntries(bundle.map(b=>[b.id,b] as const));
+        for(let i=0;i<order.length;i++){
+          const it = byId[order[i]]; if(!it || !it._trim) continue;
+          const c=document.createElement('canvas'); c.width=bg.naturalWidth; c.height=bg.naturalHeight;
+          const cx=c.getContext('2d')!; drawCollageBase(cx); drawSingleInFrame(cx, it);
+          const sblob=await canvasToBlob(c,'image/png');
+          if(sblob){
+            const base = slug(it.name) || `img-${i+1}`;
+            zip.file(`single_${String(i+1).padStart(2,'0')}_${base}.png`, sblob);
+          }
+        }
+      }
     }
     if(!videoBlob) await renderVideo();
     if(videoBlob) zip.file('cover_animation.webm', videoBlob);
@@ -288,6 +345,11 @@ const renderVideo = async () => {
                   <label className="block text-xs text-purple-300">ช่องไฟ (px)</label>
                   <input type="number" className="w-full border border-purple-700 bg-[#0f0b1e] text-purple-200 rounded px-2 py-1" value={gap} onChange={(e)=> setGap(Math.max(0, Number(e.target.value)||0))} />
                 </div>
+              </div>
+
+              <div className="mt-2 flex items-center gap-2">
+                <input id="alsoSingle" type="checkbox" checked={alsoExportSingle} onChange={(e)=> setAlsoExportSingle(e.target.checked)} />
+                <label htmlFor="alsoSingle" className="text-xs text-purple-300">Also export single image in frame (all)</label>
               </div>
 
               <div className="grid grid-cols-2 gap-3 mt-2">
